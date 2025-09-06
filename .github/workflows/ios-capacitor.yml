@@ -32,7 +32,6 @@ jobs:
           npm ci
           npx cap sync ios
 
-      # Robust base64 decode on macOS + show sizes & checksum
       - name: Decode signing assets (robust)
         shell: bash
         env:
@@ -52,16 +51,37 @@ jobs:
           echo "profile.mobileprovision bytes: $(wc -c < profile.mobileprovision)"
           shasum -a 256 cert.p12 || openssl dgst -sha256 cert.p12
 
-      - name: Create keychain & import certificate
+      - name: Create keychain & import certificate (verify + fallback)
         shell: bash
         env:
           CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
         run: |
+          set -euo pipefail
           security create-keychain -p "" build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p "" build.keychain
           security set-keychain-settings -u build.keychain
-          security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign
+
+          echo "Verifying P12 password with OpenSSL…"
+          # This fails fast if the password is wrong
+          openssl pkcs12 -in cert.p12 -passin env:CERT_PW -info -noout
+
+          echo "Trying direct P12 import into keychain…"
+          if security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
+            echo "P12 imported via 'security import'."
+          else
+            echo "Direct import failed; extracting key+cert and importing separately…"
+            # Extract private key & cert
+            openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nocerts -nodes -out key.pem
+            openssl pkcs12 -in cert.p12 -passin env:CERT_PW -clcerts -nokeys -out cert.pem
+            # Normalize private key to PKCS#8 (some systems need this)
+            openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem || cp key.pem key-pkcs8.pem
+            # Import key and cert
+            security import key-pkcs8.pem -k build.keychain -T /usr/bin/codesign -f pkcs8 -P ""
+            security import cert.pem      -k build.keychain -T /usr/bin/codesign
+          fi
+
+          # Allow codesign/Xcode to use the key
           security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
 
       - name: Install provisioning profile
