@@ -6,7 +6,7 @@ workflows:
 
     environment:
       groups:
-        - appstore_credentials   # MUST contain: APP_STORE_CONNECT_API_KEY / APP_STORE_CONNECT_KEY_ID / APP_STORE_CONNECT_ISSUER_ID / APPLE_TEAM_ID
+        - appstore_credentials   # MUST contain: APP_STORE_CONNECT_API_KEY or APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_ID or APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, APPLE_TEAM_ID
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
@@ -50,29 +50,50 @@ workflows:
           echo "Codemagic app-store-connect CLI version:"
           app-store-connect --version || true
 
-          echo "Fetching/creating signing files for bundle id: $BUNDLE_ID"
-
-          # Try modern syntax first; fall back to legacy variants if needed
-          if app-store-connect fetch-signing-files --help 2>/dev/null | grep -q -- "--bundle-id"; then
-            app-store-connect fetch-signing-files \
-              --type IOS_APP_STORE \
-              --bundle-id "$BUNDLE_ID" \
-              --create
-          else
-            app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create || \
-            app-store-connect get-signing-files --type IOS_APP_STORE --bundle-id "$BUNDLE_ID" --create || \
-            app-store-connect get-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          # ---- Normalize variable names expected by different Codemagic/ASC CLI versions ----
+          # Accept either KEY_ID or KEY_IDENTIFIER
+          if [ -n "${APP_STORE_CONNECT_KEY_ID:-}" ] && [ -z "${APP_STORE_CONNECT_KEY_IDENTIFIER:-}" ]; then
+            export APP_STORE_CONNECT_KEY_IDENTIFIER="$APP_STORE_CONNECT_KEY_ID"
           fi
 
-          # Install the downloaded certificates and provisioning profiles
+          # Accept either API_KEY or PRIVATE_KEY
+          if [ -n "${APP_STORE_CONNECT_API_KEY:-}" ] && [ -z "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]; then
+            export APP_STORE_CONNECT_PRIVATE_KEY="$APP_STORE_CONNECT_API_KEY"
+          fi
+
+          # Basic sanity checks
+          : "${APP_STORE_CONNECT_ISSUER_ID:?Missing APP_STORE_CONNECT_ISSUER_ID}"
+          : "${APP_STORE_CONNECT_KEY_IDENTIFIER:?Missing APP_STORE_CONNECT_KEY_IDENTIFIER or APP_STORE_CONNECT_KEY_ID}"
+          : "${APP_STORE_CONNECT_PRIVATE_KEY:?Missing APP_STORE_CONNECT_PRIVATE_KEY or APP_STORE_CONNECT_API_KEY}"
+
+          # Prepare a private key file (raw or base64)
+          ASC_KEY_FILE="$CM_BUILD_DIR/asc_api_key.p8"
+          if echo "$APP_STORE_CONNECT_PRIVATE_KEY" | grep -q "BEGIN PRIVATE KEY"; then
+            # Raw .p8 text
+            printf "%s\n" "$APP_STORE_CONNECT_PRIVATE_KEY" > "$ASC_KEY_FILE"
+          else
+            # Base64-encoded
+            printf "%s" "$APP_STORE_CONNECT_PRIVATE_KEY" | base64 --decode > "$ASC_KEY_FILE"
+          fi
+
+          echo "Fetching/creating signing files for bundle id: $BUNDLE_ID"
+          # Use explicit auth flags (works across CLI variants)
+          app-store-connect fetch-signing-files \
+            --type IOS_APP_STORE \
+            --bundle-id "$BUNDLE_ID" \
+            --create \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --private-key-file "$ASC_KEY_FILE"
+
+          # Install the downloaded certs/profiles into the keychain
           keychain add-certificates
 
           # Sanity check that Codemagic exported these envs
           echo "Using certificate identity: ${CM_CERTIFICATE_IDENTITY:-<missing>}"
           echo "Using provisioning profile: ${CM_PROVISIONING_PROFILE:-<missing>}"
-
           if [ -z "$CM_CERTIFICATE_IDENTITY" ] || [ -z "$CM_PROVISIONING_PROFILE" ]; then
-            echo "❌ Missing signing assets. Check APP_STORE_CONNECT_* and APPLE_TEAM_ID variables and App existence in App Store Connect."
+            echo "❌ Missing signing assets after fetch. Verify credentials & that the app ($BUNDLE_ID) exists under this team."
             exit 1
           fi
 
@@ -116,7 +137,7 @@ workflows:
 
     publishing:
       app_store_connect:
-        key_id: $APP_STORE_CONNECT_KEY_ID
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
-        api_key: $APP_STORE_CONNECT_API_KEY
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
         submit_to_testflight: true
