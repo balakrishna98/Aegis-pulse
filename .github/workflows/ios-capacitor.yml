@@ -32,14 +32,25 @@ jobs:
           npm ci
           npx cap sync ios
 
-      - name: Decode signing assets
+      # Robust base64 decode (works on BSD/GNU) + show sizes + checksum
+      - name: Decode signing assets (robust)
         shell: bash
         env:
-          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
-          IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+          P12_B64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          MP_B64:  ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
         run: |
-          echo "$IOS_CERTIFICATE_P12_BASE64" | base64 --decode > cert.p12
-          echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > profile.mobileprovision
+          set -euo pipefail
+          decflag="--decode"
+          if ! echo Zg== | base64 --decode >/dev/null 2>&1; then
+            if echo Zg== | base64 -d >/dev/null 2>&1; then decflag="-d";
+            elif echo Zg== | base64 -D >/dev/null 2>&1; then decflag="-D";
+            else echo "No usable base64 decoder"; exit 2; fi
+          fi
+          echo "$P12_B64" | base64 $decflag > cert.p12
+          echo "$MP_B64"  | base64 $decflag > profile.mobileprovision
+          echo "cert.p12 bytes: $(wc -c < cert.p12)"
+          echo "profile.mobileprovision bytes: $(wc -c < profile.mobileprovision)"
+          shasum -a 256 cert.p12 || openssl dgst -sha256 cert.p12
 
       - name: Create keychain & import certificate
         shell: bash
@@ -98,12 +109,12 @@ jobs:
       - name: Upload to TestFlight
         shell: bash
         env:
-          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
-          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_API_KEY_ID:       ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID:    ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8_BASE64:${{ secrets.ASC_API_KEY_P8_BASE64 }}
         run: |
           sudo gem install fastlane -N
-          echo "$ASC_API_KEY_P8_BASE64" | base64 --decode > AuthKey.p8
+          echo "$ASC_API_KEY_P8_BASE64" | base64 -D > AuthKey.p8 2>/dev/null || echo "$ASC_API_KEY_P8_BASE64" | base64 --decode > AuthKey.p8
           KEY_ESCAPED=$(awk '{printf "%s\\n",$0}' AuthKey.p8)
           cat > api_key.json <<JSON
           { "key_id":"$ASC_API_KEY_ID", "issuer_id":"$ASC_API_ISSUER_ID", "key":"$KEY_ESCAPED", "in_house":false }
