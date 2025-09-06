@@ -51,7 +51,7 @@ jobs:
           echo "profile.mobileprovision bytes: $(wc -c < profile.mobileprovision)"
           shasum -a 256 cert.p12 || openssl dgst -sha256 cert.p12
 
-      - name: Create keychain & import certificate (verify + fallback)
+      - name: Create keychain & import certificate (DER fallback)
         shell: bash
         env:
           CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
@@ -62,27 +62,28 @@ jobs:
           security unlock-keychain -p "" build.keychain
           security set-keychain-settings -u build.keychain
 
-          echo "Verifying P12 password with OpenSSL…"
-          # This fails fast if the password is wrong
+          echo "Verify P12 password with OpenSSL (should print MAC info)…"
           openssl pkcs12 -in cert.p12 -passin env:CERT_PW -info -noout
 
-          echo "Trying direct P12 import into keychain…"
-          if security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
-            echo "P12 imported via 'security import'."
-          else
-            echo "Direct import failed; extracting key+cert and importing separately…"
-            # Extract private key & cert
+          echo "Try direct P12 import…"
+          if ! security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
+            echo "Direct import failed → extract & import DER-formatted key+cert…"
+            # Extract PEMs
             openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nocerts -nodes -out key.pem
             openssl pkcs12 -in cert.p12 -passin env:CERT_PW -clcerts -nokeys -out cert.pem
-            # Normalize private key to PKCS#8 (some systems need this)
-            openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem || cp key.pem key-pkcs8.pem
-            # Import key and cert
-            security import key-pkcs8.pem -k build.keychain -T /usr/bin/codesign -f pkcs8 -P ""
-            security import cert.pem      -k build.keychain -T /usr/bin/codesign
+            # Convert to DER explicitly
+            openssl pkcs8 -topk8 -nocrypt -in key.pem  -out key.der  -outform DER
+            openssl x509  -in cert.pem  -out cert.der  -outform DER
+            # Import with explicit formats
+            security import key.der  -k build.keychain -T /usr/bin/codesign -f pkcs8  -P ""
+            security import cert.der -k build.keychain -T /usr/bin/codesign -f x509
           fi
 
-          # Allow codesign/Xcode to use the key
+          # Let Xcode/codesign use the key
           security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+
+          echo "Installed identities:"
+          security find-identity -v -p codesigning build.keychain || true
 
       - name: Install provisioning profile
         shell: bash
