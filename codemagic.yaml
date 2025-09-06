@@ -1,6 +1,6 @@
 workflows:
   ios_capacitor_appstore:
-    name: iOS • Capacitor → App Store (403 debugger + provider)
+    name: iOS • Capacitor → App Store
     max_build_duration: 60
     instance_type: mac_mini_m2
 
@@ -11,8 +11,7 @@ workflows:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
-        APPLE_TEAM_ID: "4ZB476DJS4"          # your real 10-char Team ID
-        APP_STORE_CONNECT_PROVIDER_ID: 128123837  # numeric (no quotes recommended)
+        APPLE_TEAM_ID: "4ZB476DJS4"
       node: 20
       xcode: 15
 
@@ -34,17 +33,10 @@ workflows:
           [ -n "${APPLE_TEAM_ID:-}" ]                    || fail "APPLE_TEAM_ID is empty"
           [ -n "${BUNDLE_ID:-}" ]                        || fail "BUNDLE_ID is empty"
 
-          # Provider must be numeric when set
-          if [ -n "${APP_STORE_CONNECT_PROVIDER_ID:-}" ]; then
-            if ! [[ "$APP_STORE_CONNECT_PROVIDER_ID" =~ ^[0-9]+$ ]]; then
-              fail "APP_STORE_CONNECT_PROVIDER_ID must be numeric; got '$APP_STORE_CONNECT_PROVIDER_ID'"
-            fi
-          fi
-
           # Write API key (strip CRs so ASC CLI doesn't choke)
           printf "%s" "$APP_STORE_CONNECT_PRIVATE_KEY" | tr -d '\r' > /tmp/asc_api_key.p8
 
-          # Certificate private key: support plain or base64
+          # Certificate private key (plain or base64)
           if [ -z "${CERTIFICATE_PRIVATE_KEY_B64:-}" ] && [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
             fail "Provide CERTIFICATE_PRIVATE_KEY_B64 or CERTIFICATE_PRIVATE_KEY"
           fi
@@ -70,44 +62,29 @@ workflows:
           openssl rsa -in /tmp/cert_key.pem -check -noout || fail "Invalid RSA key"
           echo "✅ RSA key ok"
 
-      - name: Sanity check (apps & bundle-ids with provider)
+      - name: Sanity check (apps & bundle-ids)
         script: |
           set -euo pipefail
           echo "Issuer ID: ${APP_STORE_CONNECT_ISSUER_ID}"
           echo "Key ID: ${APP_STORE_CONNECT_KEY_IDENTIFIER}"
 
-          PROV_ARGS=()
-          if [ -n "${APP_STORE_CONNECT_PROVIDER_ID:-}" ]; then
-            if ! [[ "$APP_STORE_CONNECT_PROVIDER_ID" =~ ^[0-9]+$ ]]; then
-              echo "❌ APP_STORE_CONNECT_PROVIDER_ID must be numeric; got '$APP_STORE_CONNECT_PROVIDER_ID'"
-              exit 2
-            fi
-            echo "Provider ID: ${APP_STORE_CONNECT_PROVIDER_ID}"
-            PROV_ARGS=(--content-provider-id "$APP_STORE_CONNECT_PROVIDER_ID")
-          else
-            echo "Provider ID not set (will attempt without)"
-          fi
-
           echo "→ apps list"
           app-store-connect apps list --verbose \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --private-key @file:/tmp/asc_api_key.p8 \
-            "${PROV_ARGS[@]}" | head -n 50
+            --private-key @file:/tmp/asc_api_key.p8 | head -n 50
 
           echo "→ bundle-ids list"
           app-store-connect bundle-ids list --verbose \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --private-key @file:/tmp/asc_api_key.p8 \
-            "${PROV_ARGS[@]}" | head -n 50
+            --private-key @file:/tmp/asc_api_key.p8 | head -n 50
 
           echo "→ bundle-ids filter"
           app-store-connect bundle-ids list --verbose \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
             --private-key @file:/tmp/asc_api_key.p8 \
-            "${PROV_ARGS[@]}" \
             --filter-identifier "$BUNDLE_ID" \
             --filter-platform IOS | head -n 50
 
@@ -121,25 +98,13 @@ workflows:
         script: |
           set -euo pipefail
           keychain initialize
-
-          PROV_ARGS=()
-          if [ -n "${APP_STORE_CONNECT_PROVIDER_ID:-}" ]; then
-            if ! [[ "$APP_STORE_CONNECT_PROVIDER_ID" =~ ^[0-9]+$ ]]; then
-              echo "❌ APP_STORE_CONNECT_PROVIDER_ID must be numeric; got '$APP_STORE_CONNECT_PROVIDER_ID'"
-              exit 2
-            fi
-            PROV_ARGS=(--content-provider-id "$APP_STORE_CONNECT_PROVIDER_ID")
-          fi
-
           app-store-connect fetch-signing-files --verbose \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
             --private-key @file:/tmp/asc_api_key.p8 \
             --certificate-key @file:/tmp/cert_key.pem \
             --type IOS_APP_STORE \
-            "${PROV_ARGS[@]}" \
             "$BUNDLE_ID"
-
           keychain add-certificates
           xcode-project use-profiles
 
