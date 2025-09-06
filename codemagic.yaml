@@ -6,7 +6,7 @@ workflows:
 
     environment:
       groups:
-        - appstore_credentials   # must contain: APP_STORE_CONNECT_API_KEY / APP_STORE_CONNECT_KEY_ID / APP_STORE_CONNECT_ISSUER_ID / APPLE_TEAM_ID
+        - appstore_credentials   # MUST contain: APP_STORE_CONNECT_API_KEY / APP_STORE_CONNECT_KEY_ID / APP_STORE_CONNECT_ISSUER_ID / APPLE_TEAM_ID
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
@@ -21,7 +21,8 @@ workflows:
 
     scripts:
       - name: Install Node deps
-        script: npm ci
+        script: |
+          npm ci
 
       - name: Build web assets
         script: |
@@ -29,7 +30,8 @@ workflows:
           [ -d www ] || mkdir -p www
 
       - name: Capacitor sync (installs pods)
-        script: npx cap sync ios
+        script: |
+          npx cap sync ios
 
       - name: Set build number
         script: |
@@ -37,27 +39,46 @@ workflows:
           agvtool new-version -all "$BUILD_NUMBER"
           cd -
 
-      # ⬇️ NEW: Fetch & install certs + profiles from App Store Connect
+      # --- Provisioning: fetch/create certs & profiles via App Store Connect API ---
       - name: Provisioning (create/fetch signing files)
         script: |
-          # Create a temporary keychain for this build
+          set -e
+
+          # Create a temp keychain for this build
           keychain initialize
 
-          # Fetch or create App Store profile + distribution certificate for the bundle id
-          app-store-connect fetch-signing-files \
-            --type IOS_APP_STORE \
-            --bundle-id "$BUNDLE_ID" \
-            --create
+          echo "Codemagic app-store-connect CLI version:"
+          app-store-connect --version || true
 
-          # Install downloaded certs/profiles to the keychain
+          echo "Fetching/creating signing files for bundle id: $BUNDLE_ID"
+
+          # Try modern syntax first; fall back to legacy variants if needed
+          if app-store-connect fetch-signing-files --help 2>/dev/null | grep -q -- "--bundle-id"; then
+            app-store-connect fetch-signing-files \
+              --type IOS_APP_STORE \
+              --bundle-id "$BUNDLE_ID" \
+              --create
+          else
+            app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create || \
+            app-store-connect get-signing-files --type IOS_APP_STORE --bundle-id "$BUNDLE_ID" --create || \
+            app-store-connect get-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          fi
+
+          # Install the downloaded certificates and provisioning profiles
           keychain add-certificates
 
-      # Archive with MANUAL signing using the installed assets
+          # Sanity check that Codemagic exported these envs
+          echo "Using certificate identity: ${CM_CERTIFICATE_IDENTITY:-<missing>}"
+          echo "Using provisioning profile: ${CM_PROVISIONING_PROFILE:-<missing>}"
+
+          if [ -z "$CM_CERTIFICATE_IDENTITY" ] || [ -z "$CM_PROVISIONING_PROFILE" ]; then
+            echo "❌ Missing signing assets. Check APP_STORE_CONNECT_* and APPLE_TEAM_ID variables and App existence in App Store Connect."
+            exit 1
+          fi
+
+      # --- Archive with MANUAL signing using installed assets ---
       - name: Xcode archive
         script: |
-          # Codemagic sets these after fetch-signing-files:
-          #   CM_CERTIFICATE_IDENTITY  (e.g. "Apple Distribution: ... (TEAMID)")
-          #   CM_PROVISIONING_PROFILE  (profile name)
           xcodebuild \
             -workspace "$XCODE_WORKSPACE" \
             -scheme "$XCODE_SCHEME" \
