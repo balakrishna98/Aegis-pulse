@@ -70,50 +70,51 @@ jobs:
             echo "P12 imported via security."
           else
             echo "Direct import failed → converting to PEM sequence and importing…"
-            # bundle.pem contains PRIVATE KEY + CERTIFICATE(s)
             openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nodes -out bundle.pem
 
-            # First try importing the whole bundle as a PEM sequence (preferred)
             if security import bundle.pem -k build.keychain -f pemseq -A -T /usr/bin/codesign; then
               echo "Imported PEM sequence."
             else
               echo "PEM sequence import failed → split and import explicitly…"
-              # Extract just the first private key and all certs
               awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' bundle.pem > key.pem
               awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/'       bundle.pem > certs.pem
-
-              # Convert key to PKCS#8 DER (no passphrase) and import
               openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.der -outform DER
               security import key-pkcs8.der -k build.keychain -f pkcs8 -t priv -T /usr/bin/codesign -A
-
-              # Import certs (X.509)
-              security import certs.pem -k build.keychain -f x509 -T /usr/bin/codesign
+              security import certs.pem    -k build.keychain -f x509  -T /usr/bin/codesign
             fi
           fi
 
-          # Allow codesign/Xcode to use the key
           security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
-
           echo "Installed identities:"
           security find-identity -v -p codesigning build.keychain || true
 
       - name: Install provisioning profile
         shell: bash
+        env:
+          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
         run: |
+          set -euo pipefail
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           /usr/bin/security cms -D -i profile.mobileprovision > profile.plist
           UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' profile.plist)
           cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
-          echo "Profile UUID: $UUID"
+          echo "Profile UUID: $UUID  Name: $PROFILE_NAME"
+          # expose for later steps
+          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
 
-      - name: Build archive
+      - name: Build archive (force manual distribution signing)
         shell: bash
         run: |
-          xcodebuild clean -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" -configuration Release
-          xcodebuild -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" -configuration Release -sdk iphoneos \
+          xcodebuild -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -archivePath "$PWD/build/App.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="${{ secrets.PROVISIONING_PROFILE_NAME }}" \
+            PROVISIONING_PROFILE="$PROFILE_UUID" \
             archive
 
       - name: Export IPA
@@ -125,7 +126,6 @@ jobs:
           <plist version="1.0"><dict>
             <key>method</key><string>app-store</string>
             <key>compileBitcode</key><false/>
-            <key>manageAppVersionAndBuildNumber</key><true/>
             <key>signingStyle</key><string>manual</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
             <key>provisioningProfiles</key><dict>
