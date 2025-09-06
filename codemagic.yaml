@@ -6,7 +6,7 @@ workflows:
 
     environment:
       groups:
-        - appstore_credentials     # Must contain: APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, CERTIFICATE_PRIVATE_KEY_B64 (or CERTIFICATE_PRIVATE_KEY), APPLE_TEAM_ID
+        - appstore_credentials   # Must contain: APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, CERTIFICATE_PRIVATE_KEY_B64 (or CERTIFICATE_PRIVATE_KEY), APPLE_TEAM_ID
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
@@ -47,8 +47,12 @@ workflows:
           # Decode/normalize certificate private key to /tmp/cert_key_any.pem
           if [ -n "${CERTIFICATE_PRIVATE_KEY_B64:-}" ]; then
             printf "%s" "$CERTIFICATE_PRIVATE_KEY_B64" | tr -d '\r' > /tmp/cert_key.b64
-            if base64 --help 2>/dev/null | grep -q -- "--decode"; then DEC="--decode"; else DEC="-D"; fi
-            base64 $DEC /tmp/cert_key.b64 > /tmp/cert_key_any.pem || fail "Base64 decode failed for CERTIFICATE_PRIVATE_KEY_B64"
+            # Pick a decode flag that actually works, and always read via stdin (BSD base64 wants stdin or -i)
+            if echo -n "Zg==" | base64 --decode >/dev/null 2>&1; then DEC="--decode"
+            elif echo -n "Zg==" | base64 -d       >/dev/null 2>&1; then DEC="-d"
+            elif echo -n "Zg==" | base64 -D       >/dev/null 2>&1; then DEC="-D"
+            else fail "No usable base64 decode option found"; fi
+            base64 $DEC < /tmp/cert_key.b64 > /tmp/cert_key_any.pem || fail "Base64 decode failed for CERTIFICATE_PRIVATE_KEY_B64"
           else
             printf "%s" "$CERTIFICATE_PRIVATE_KEY" | tr -d '\r' > /tmp/cert_key_any.pem
           fi
