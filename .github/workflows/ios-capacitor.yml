@@ -61,7 +61,7 @@ jobs:
           security default-keychain -s build.keychain
           security unlock-keychain -p "" build.keychain
           security set-keychain-settings -u build.keychain
-          # Make sure our keychain is searched
+          # Ensure our keychain is searched
           security list-keychains -s build.keychain login.keychain
 
           # Verify P12
@@ -117,38 +117,44 @@ jobs:
              "$APP_PATH/embedded.mobileprovision"
           ls -l "$APP_PATH/embedded.mobileprovision"
 
-      # Export WITH MANUAL signing; no profile map; fallback to 'app-store' if Xcode crashes
-      - name: Export IPA (manual signing, crash-safe)
+      # 🔧 Manually sign nested frameworks & the app, then package IPA (bypass xcodebuild export)
+      - name: Manual sign & package IPA
         shell: bash
         run: |
           set -euo pipefail
+          APP_PATH="$PWD/build/App.xcarchive/Products/Applications/${XCODE_SCHEME}.app"
           DIST_ID="Apple Distribution: Balakrishna Mamidala (${APPLE_TEAM_ID})"
 
-          make_plist() {
-            local METHOD="$1"
-            cat > ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>${METHOD}</string>
-            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>signingCertificate</key><string>${DIST_ID}</string>
-            <key>compileBitcode</key><false/>
-            <key>destination</key><string>export</string>
-          </dict></plist>
-          EOF
-          }
+          # Create entitlements from embedded profile (subset allowed by profile)
+          /usr/bin/security cms -D -i "$APP_PATH/embedded.mobileprovision" > emb.plist
+          /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' emb.plist > entitlements.plist
+          echo "Entitlements:"; /usr/libexec/PlistBuddy -c 'Print' entitlements.plist || true
 
-          echo "Trying export with method=app-store-connect…"
-          make_plist "app-store-connect"
-          cat ExportOptions.plist
-          if ! xcodebuild -exportArchive -archivePath "$PWD/build/App.xcarchive" -exportOptionsPlist ExportOptions.plist -exportPath "$PWD/build/export"; then
-            echo "First export failed; trying deprecated method=app-store…"
-            make_plist "app-store"
-            cat ExportOptions.plist
-            xcodebuild -exportArchive -archivePath "$PWD/build/App.xcarchive" -exportOptionsPlist ExportOptions.plist -exportPath "$PWD/build/export"
+          # Re-sign nested frameworks (.framework, .dylib) if present
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            find "$APP_PATH/Frameworks" -type f -name "*.dylib" -print0 | xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" "{}"
+            find "$APP_PATH/Frameworks" -type d -name "*.framework" -maxdepth 1 -print0 | xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" "{}"
           fi
+
+          # Re-sign app extensions if any
+          if [ -d "$APP_PATH/PlugIns" ]; then
+            find "$APP_PATH/PlugIns" -type d -name "*.appex" -maxdepth 1 -print0 | \
+              xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" --entitlements entitlements.plist "{}"
+          fi
+
+          # Re-sign the main app with entitlements
+          codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" --entitlements entitlements.plist "$APP_PATH"
+
+          # Verify signature
+          codesign --verify --deep --strict "$APP_PATH"
+          codesign -dv "$APP_PATH" || true
+
+          # Package IPA
+          mkdir -p build/export Payload
+          cp -R "$APP_PATH" Payload/App.app
+          (cd Payload && zip -qry ../build/export/App.ipa .)
+          rm -rf Payload
+          echo "IPA at: build/export/App.ipa"
 
       - name: Upload to TestFlight
         shell: bash
@@ -164,8 +170,7 @@ jobs:
           cat > api_key.json <<JSON
           { "key_id":"$ASC_API_KEY_ID", "issuer_id":"$ASC_API_ISSUER_ID", "key":"$KEY_ESCAPED", "in_house":false }
           JSON
-          IPA_PATH=$(echo "$PWD"/build/export/*.ipa | head -n 1)
-          fastlane pilot upload --api_key_path api_key.json --ipa "$IPA_PATH" --bundle_identifier "$BUNDLE_ID"
+          fastlane pilot upload --api_key_path api_key.json --ipa "$PWD/build/export/App.ipa" --bundle_identifier "$BUNDLE_ID"
 
       - name: Save artifacts
         uses: actions/upload-artifact@v4
@@ -175,3 +180,5 @@ jobs:
             build/export/*.ipa
             build/App.xcarchive
             ExportOptions.plist
+            entitlements.plist
+            emb.plist
