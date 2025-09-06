@@ -1,18 +1,16 @@
 workflows:
   ios_capacitor_appstore:
-    name: iOS • Capacitor → App Store (Validate keys)
+    name: iOS • Capacitor → App Store (Auto signing + B64 key)
     max_build_duration: 60
     instance_type: mac_mini_m2
 
     environment:
       groups:
-        - appstore_credentials          # contains all ASC vars + CERTIFICATE_PRIVATE_KEY + APPLE_TEAM_ID
+        - appstore_credentials     # Must contain: APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, CERTIFICATE_PRIVATE_KEY_B64 (or CERTIFICATE_PRIVATE_KEY), APPLE_TEAM_ID
       vars:
-        # ---- EDIT THESE IF NEEDED ----
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
-        # --------------------------------
       node: 20
       xcode: 15
 
@@ -24,50 +22,51 @@ workflows:
           node -v || true
           app-store-connect --version || true
 
-      - name: Validate App Store Connect vars (no secrets printed)
+      - name: Decode & validate keys (no secrets printed)
         script: |
           set -euo pipefail
           fail(){ echo "❌ $1"; exit 1; }
 
-          # Presence
+          # Presence checks
           [ -n "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]    || fail "APP_STORE_CONNECT_PRIVATE_KEY is empty"
           [ -n "${APP_STORE_CONNECT_KEY_IDENTIFIER:-}" ] || fail "APP_STORE_CONNECT_KEY_IDENTIFIER is empty"
           [ -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ]      || fail "APP_STORE_CONNECT_ISSUER_ID is empty"
-          [ -n "${CERTIFICATE_PRIVATE_KEY:-}" ]          || fail "CERTIFICATE_PRIVATE_KEY is empty"
           [ -n "${APPLE_TEAM_ID:-}" ]                    || fail "APPLE_TEAM_ID is empty"
           [ -n "${BUNDLE_ID:-}" ]                        || fail "BUNDLE_ID is empty"
+          if [ -z "${CERTIFICATE_PRIVATE_KEY_B64:-}" ] && [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            fail "Provide CERTIFICATE_PRIVATE_KEY_B64 or CERTIFICATE_PRIVATE_KEY"
+          fi
 
-          # Normalize CRLF and save to temp
+          # Normalize ASC .p8 (PKCS#8)
           printf "%s" "$APP_STORE_CONNECT_PRIVATE_KEY" | tr -d '\r' > /tmp/asc_api_key.p8
-          printf "%s" "$CERTIFICATE_PRIVATE_KEY"      | tr -d '\r' > /tmp/cert_key_any.pem
+          echo "ASC key header: $(head -n1 /tmp/asc_api_key.p8)"
+          echo "ASC key footer: $(tail -n1 /tmp/asc_api_key.p8)"
+          grep -q "BEGIN PRIVATE KEY" /tmp/asc_api_key.p8 || fail "APP_STORE_CONNECT_PRIVATE_KEY must start with '-----BEGIN PRIVATE KEY-----'"
+          grep -q "END PRIVATE KEY"   /tmp/asc_api_key.p8 || fail "APP_STORE_CONNECT_PRIVATE_KEY appears truncated"
 
-          # Check ASC .p8 headers (safe: prints only header lines)
-          first_asc="$(head -n1 /tmp/asc_api_key.p8 || true)"
-          last_asc="$(tail -n1 /tmp/asc_api_key.p8 || true)"
-          echo "ASC key header: $first_asc"
-          echo "ASC key footer: $last_asc"
-          grep -q "BEGIN PRIVATE KEY" <<<"$first_asc" || fail "APP_STORE_CONNECT_PRIVATE_KEY must start with '-----BEGIN PRIVATE KEY-----'"
-          grep -q "END PRIVATE KEY"   <<<"$last_asc"  || fail "APP_STORE_CONNECT_PRIVATE_KEY seems truncated"
-
-          # Prepare CERTIFICATE_PRIVATE_KEY as PKCS#1 RSA
-          first_cert="$(head -n1 /tmp/cert_key_any.pem || true)"
-          last_cert="$(tail -n1 /tmp/cert_key_any.pem || true)"
-          echo "Cert key header: $first_cert"
-          echo "Cert key footer: $last_cert"
-
-          if grep -q "BEGIN RSA PRIVATE KEY" <<<"$first_cert"; then
-            cp /tmp/cert_key_any.pem /tmp/cert_key.pem
-          elif grep -q "BEGIN PRIVATE KEY" <<<"$first_cert"; then
-            # Convert PKCS#8 -> PKCS#1
-            openssl pkey -in /tmp/cert_key_any.pem -out /tmp/cert_key.pem >/dev/null 2>&1 || fail "Failed converting CERTIFICATE_PRIVATE_KEY to RSA/PKCS#1"
-          elif grep -q "BEGIN OPENSSH PRIVATE KEY" <<<"$first_cert"; then
-            fail "CERTIFICATE_PRIVATE_KEY is OpenSSH format. Generate a PEM RSA key (e.g., 'openssl genrsa -out key.pem 2048')."
+          # Decode/normalize certificate private key to /tmp/cert_key_any.pem
+          if [ -n "${CERTIFICATE_PRIVATE_KEY_B64:-}" ]; then
+            printf "%s" "$CERTIFICATE_PRIVATE_KEY_B64" | tr -d '\r' > /tmp/cert_key.b64
+            if base64 --help 2>/dev/null | grep -q -- "--decode"; then DEC="--decode"; else DEC="-D"; fi
+            base64 $DEC /tmp/cert_key.b64 > /tmp/cert_key_any.pem || fail "Base64 decode failed for CERTIFICATE_PRIVATE_KEY_B64"
           else
-            fail "CERTIFICATE_PRIVATE_KEY has unexpected header"
+            printf "%s" "$CERTIFICATE_PRIVATE_KEY" | tr -d '\r' > /tmp/cert_key_any.pem
+          fi
+
+          echo "Cert key header: $(head -n1 /tmp/cert_key_any.pem)"
+          echo "Cert key footer: $(tail -n1 /tmp/cert_key_any.pem)"
+
+          # Ensure PKCS#1 RSA (convert if PKCS#8)
+          if grep -q "BEGIN RSA PRIVATE KEY" /tmp/cert_key_any.pem; then
+            cp /tmp/cert_key_any.pem /tmp/cert_key.pem
+          elif grep -q "BEGIN PRIVATE KEY" /tmp/cert_key_any.pem; then
+            openssl pkey -in /tmp/cert_key_any.pem -out /tmp/cert_key.pem >/dev/null 2>&1 || fail "Failed converting PKCS#8 -> PKCS#1"
+          else
+            fail "CERTIFICATE_PRIVATE_KEY must be 'BEGIN RSA PRIVATE KEY' or 'BEGIN PRIVATE KEY'"
           fi
 
           # Validate RSA
-          openssl rsa -in /tmp/cert_key.pem -check -noout || fail "Invalid RSA key in CERTIFICATE_PRIVATE_KEY"
+          openssl rsa -in /tmp/cert_key.pem -check -noout || fail "Invalid RSA key"
 
           # Re-export normalized values for next steps
           export APP_STORE_CONNECT_PRIVATE_KEY="$(cat /tmp/asc_api_key.p8)"
@@ -81,11 +80,10 @@ workflows:
           npm ci
           npx cap sync ios
 
-      - name: Fetch/create signing files (Automatic)
+      - name: Provisioning (create/fetch signing files)
         script: |
           set -e
           keychain initialize
-          # Create/fetch Apple Distribution cert + profile
           app-store-connect fetch-signing-files \
             --type IOS_APP_STORE \
             --bundle-id "$BUNDLE_ID" \
@@ -96,7 +94,7 @@ workflows:
           keychain add-certificates
           xcode-project use-profiles
 
-      - name: Build IPA
+      - name: Build IPA (App Store)
         script: |
           set -e
           xcode-project build-ipa \
