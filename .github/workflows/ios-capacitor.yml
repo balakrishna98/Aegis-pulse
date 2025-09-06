@@ -61,7 +61,7 @@ jobs:
           security default-keychain -s build.keychain
           security unlock-keychain -p "" build.keychain
           security set-keychain-settings -u build.keychain
-          # Ensure search list contains build.keychain and login
+          # Make sure our keychain is searched
           security list-keychains -s build.keychain login.keychain
 
           # Verify P12
@@ -117,16 +117,20 @@ jobs:
              "$APP_PATH/embedded.mobileprovision"
           ls -l "$APP_PATH/embedded.mobileprovision"
 
-      # Export WITH MANUAL signing; NO provisioningProfiles dict
-      - name: Export IPA (manual signing, no profile map)
+      # Export WITH MANUAL signing; no profile map; fallback to 'app-store' if Xcode crashes
+      - name: Export IPA (manual signing, crash-safe)
         shell: bash
         run: |
+          set -euo pipefail
           DIST_ID="Apple Distribution: Balakrishna Mamidala (${APPLE_TEAM_ID})"
-          cat > ExportOptions.plist <<EOF
+
+          make_plist() {
+            local METHOD="$1"
+            cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-            <key>method</key><string>app-store-connect</string>
+            <key>method</key><string>${METHOD}</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
             <key>signingStyle</key><string>manual</string>
             <key>signingCertificate</key><string>${DIST_ID}</string>
@@ -134,11 +138,17 @@ jobs:
             <key>destination</key><string>export</string>
           </dict></plist>
           EOF
-          echo "=== ExportOptions.plist ==="; cat ExportOptions.plist
-          xcodebuild -exportArchive \
-            -archivePath "$PWD/build/App.xcarchive" \
-            -exportOptionsPlist ExportOptions.plist \
-            -exportPath "$PWD/build/export"
+          }
+
+          echo "Trying export with method=app-store-connect…"
+          make_plist "app-store-connect"
+          cat ExportOptions.plist
+          if ! xcodebuild -exportArchive -archivePath "$PWD/build/App.xcarchive" -exportOptionsPlist ExportOptions.plist -exportPath "$PWD/build/export"; then
+            echo "First export failed; trying deprecated method=app-store…"
+            make_plist "app-store"
+            cat ExportOptions.plist
+            xcodebuild -exportArchive -archivePath "$PWD/build/App.xcarchive" -exportOptionsPlist ExportOptions.plist -exportPath "$PWD/build/export"
+          fi
 
       - name: Upload to TestFlight
         shell: bash
