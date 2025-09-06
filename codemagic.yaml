@@ -1,12 +1,12 @@
 workflows:
   ios_capacitor_appstore:
-    name: iOS • Capacitor → App Store
+    name: iOS • Capacitor → App Store (auto signing via ASC API)
     max_build_duration: 60
     instance_type: mac_mini_m2
 
     environment:
       groups:
-        - appstore_credentials               # must contain APP_STORE_CONNECT_* vars
+        - appstore_credentials            # contains APP_STORE_CONNECT_* and your cert vars
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
@@ -32,11 +32,9 @@ workflows:
           [ -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ]      || fail "APP_STORE_CONNECT_ISSUER_ID is empty"
           [ -n "${APPLE_TEAM_ID:-}" ]                    || fail "APPLE_TEAM_ID is empty"
           [ -n "${BUNDLE_ID:-}" ]                        || fail "BUNDLE_ID is empty"
-
-          # Write API key (strip CRs so ASC CLI doesn't choke)
           printf "%s" "$APP_STORE_CONNECT_PRIVATE_KEY" | tr -d '\r' > /tmp/asc_api_key.p8
 
-          # Certificate private key (plain or base64)
+          # Certificate private key (either CERTIFICATE_PRIVATE_KEY_B64 or CERTIFICATE_PRIVATE_KEY)
           if [ -z "${CERTIFICATE_PRIVATE_KEY_B64:-}" ] && [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
             fail "Provide CERTIFICATE_PRIVATE_KEY_B64 or CERTIFICATE_PRIVATE_KEY"
           fi
@@ -50,8 +48,6 @@ workflows:
           else
             printf "%s" "$CERTIFICATE_PRIVATE_KEY" | tr -d '\r' > /tmp/cert_key_any.pem
           fi
-
-          # Normalize to PKCS#1 RSA
           if grep -q "BEGIN RSA PRIVATE KEY" /tmp/cert_key_any.pem; then
             cp /tmp/cert_key_any.pem /tmp/cert_key.pem
           elif grep -q "BEGIN PRIVATE KEY" /tmp/cert_key_any.pem; then
@@ -62,31 +58,29 @@ workflows:
           openssl rsa -in /tmp/cert_key.pem -check -noout || fail "Invalid RSA key"
           echo "✅ RSA key ok"
 
-      - name: Sanity check (apps & bundle-ids)
+      - name: Sanity check (apps & CIP permission)
         script: |
           set -euo pipefail
           echo "Issuer ID: ${APP_STORE_CONNECT_ISSUER_ID}"
           echo "Key ID: ${APP_STORE_CONNECT_KEY_IDENTIFIER}"
 
-          echo "→ apps list"
+          echo "→ apps list (should work)"
           app-store-connect apps list --verbose \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --private-key @file:/tmp/asc_api_key.p8 | head -n 50
+            --private-key @file:/tmp/asc_api_key.p8 | sed -n '1,80p'
 
-          echo "→ bundle-ids list"
-          app-store-connect bundle-ids list --verbose \
+          echo "→ CIP probe: bundle-ids list (fails = missing CIP permission)"
+          if ! app-store-connect bundle-ids list --verbose \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --private-key @file:/tmp/asc_api_key.p8 | head -n 50
-
-          echo "→ bundle-ids filter"
-          app-store-connect bundle-ids list --verbose \
-            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
-            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --private-key @file:/tmp/asc_api_key.p8 \
-            --filter-identifier "$BUNDLE_ID" \
-            --filter-platform IOS | head -n 50
+            --private-key @file:/tmp/asc_api_key.p8 >/tmp/bundleids.txt 2>&1; then
+            echo "❌ Your API key lacks 'Certificates, Identifiers & Profiles' access. Enable 'Developer Resources' for the key in Users and Access, or use the manual signing workflow."
+            echo "---- bundleIds error ----"
+            sed -n '1,120p' /tmp/bundleids.txt
+            exit 78
+          fi
+          sed -n '1,80p' /tmp/bundleids.txt
 
       - name: Install JS deps & sync Capacitor
         script: |
