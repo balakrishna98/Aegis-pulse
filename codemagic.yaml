@@ -11,6 +11,8 @@ workflows:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
+        APPLE_TEAM_ID: "4ZB476DJS4"        
+        APP_STORE_CONNECT_PROVIDER_ID: "128123837"
       node: 20
       xcode: 15
 
