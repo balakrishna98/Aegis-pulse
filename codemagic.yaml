@@ -6,7 +6,7 @@ workflows:
 
     environment:
       groups:
-        - appstore_credentials   # MUST contain: APP_STORE_CONNECT_API_KEY or APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_ID or APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, APPLE_TEAM_ID
+        - appstore_credentials   # MUST include: APP_STORE_CONNECT_PRIVATE_KEY or APP_STORE_CONNECT_API_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER or APP_STORE_CONNECT_KEY_ID, APP_STORE_CONNECT_ISSUER_ID, APPLE_TEAM_ID
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
@@ -39,45 +39,46 @@ workflows:
           agvtool new-version -all "$BUILD_NUMBER"
           cd -
 
+      # --- Diagnostics to ensure your env group is correct ---
+      - name: Sanity check App Store Connect env
+        script: |
+          for var in APP_STORE_CONNECT_KEY_IDENTIFIER APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_PRIVATE_KEY APP_STORE_CONNECT_API_KEY APP_STORE_CONNECT_ISSUER_ID APPLE_TEAM_ID; do
+            if [ -n "${!var:-}" ]; then
+              echo "✅ $var is set"
+            else
+              echo "❌ $var is MISSING"
+            fi
+          done
+
       # --- Provisioning: fetch/create certs & profiles via App Store Connect API ---
       - name: Provisioning (create/fetch signing files)
         script: |
           set -e
-
-          # Create a temp keychain for this build
           keychain initialize
 
           echo "Codemagic app-store-connect CLI version:"
           app-store-connect --version || true
 
-          # ---- Normalize variable names expected by different Codemagic/ASC CLI versions ----
-          # Accept either KEY_ID or KEY_IDENTIFIER
+          # Normalize names across Codemagic/ASC CLI variants
           if [ -n "${APP_STORE_CONNECT_KEY_ID:-}" ] && [ -z "${APP_STORE_CONNECT_KEY_IDENTIFIER:-}" ]; then
             export APP_STORE_CONNECT_KEY_IDENTIFIER="$APP_STORE_CONNECT_KEY_ID"
           fi
-
-          # Accept either API_KEY or PRIVATE_KEY
           if [ -n "${APP_STORE_CONNECT_API_KEY:-}" ] && [ -z "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]; then
             export APP_STORE_CONNECT_PRIVATE_KEY="$APP_STORE_CONNECT_API_KEY"
           fi
 
-          # Basic sanity checks
           : "${APP_STORE_CONNECT_ISSUER_ID:?Missing APP_STORE_CONNECT_ISSUER_ID}"
           : "${APP_STORE_CONNECT_KEY_IDENTIFIER:?Missing APP_STORE_CONNECT_KEY_IDENTIFIER or APP_STORE_CONNECT_KEY_ID}"
           : "${APP_STORE_CONNECT_PRIVATE_KEY:?Missing APP_STORE_CONNECT_PRIVATE_KEY or APP_STORE_CONNECT_API_KEY}"
 
-          # Prepare a private key file (raw or base64)
           ASC_KEY_FILE="$CM_BUILD_DIR/asc_api_key.p8"
           if echo "$APP_STORE_CONNECT_PRIVATE_KEY" | grep -q "BEGIN PRIVATE KEY"; then
-            # Raw .p8 text
             printf "%s\n" "$APP_STORE_CONNECT_PRIVATE_KEY" > "$ASC_KEY_FILE"
           else
-            # Base64-encoded
             printf "%s" "$APP_STORE_CONNECT_PRIVATE_KEY" | base64 --decode > "$ASC_KEY_FILE"
           fi
 
           echo "Fetching/creating signing files for bundle id: $BUNDLE_ID"
-          # Use explicit auth flags (works across CLI variants)
           app-store-connect fetch-signing-files \
             --type IOS_APP_STORE \
             --bundle-id "$BUNDLE_ID" \
@@ -86,10 +87,8 @@ workflows:
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
             --private-key-file "$ASC_KEY_FILE"
 
-          # Install the downloaded certs/profiles into the keychain
           keychain add-certificates
 
-          # Sanity check that Codemagic exported these envs
           echo "Using certificate identity: ${CM_CERTIFICATE_IDENTITY:-<missing>}"
           echo "Using provisioning profile: ${CM_PROVISIONING_PROFILE:-<missing>}"
           if [ -z "$CM_CERTIFICATE_IDENTITY" ] || [ -z "$CM_PROVISIONING_PROFILE" ]; then
