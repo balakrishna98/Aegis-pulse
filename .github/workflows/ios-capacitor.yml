@@ -63,8 +63,10 @@ jobs:
           security set-keychain-settings -u build.keychain
           security list-keychains -s build.keychain login.keychain
 
+          # Verify P12
           openssl pkcs12 -in cert.p12 -passin env:CERT_PW -info -noout
 
+          # Try direct P12 import; if it fails, import PEMs
           if ! security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
             openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nodes -out bundle.pem
             if ! security import bundle.pem -k build.keychain -f pemseq -A -T /usr/bin/codesign; then
@@ -119,28 +121,36 @@ jobs:
           APP_PATH="$PWD/build/App.xcarchive/Products/Applications/${XCODE_SCHEME}.app"
           DIST_ID="Apple Distribution: Balakrishna Mamidala (${APPLE_TEAM_ID})"
 
+          # Build entitlements from embedded profile
           /usr/bin/security cms -D -i "$APP_PATH/embedded.mobileprovision" > emb.plist
           /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' emb.plist > entitlements.plist
           echo "Entitlements:"; /usr/libexec/PlistBuddy -c 'Print' entitlements.plist || true
 
+          # Re-sign nested frameworks / dylibs
           if [ -d "$APP_PATH/Frameworks" ]; then
             find "$APP_PATH/Frameworks" -type f -name "*.dylib" -print0 | xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" "{}"
             find "$APP_PATH/Frameworks" -type d -name "*.framework" -maxdepth 1 -print0 | xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" "{}"
           fi
 
+          # Re-sign app extensions
           if [ -d "$APP_PATH/PlugIns" ]; then
             find "$APP_PATH/PlugIns" -type d -name "*.appex" -maxdepth 1 -print0 | \
               xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" --entitlements entitlements.plist "{}"
           fi
 
+          # Re-sign main app
           codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" --entitlements entitlements.plist "$APP_PATH"
           codesign --verify --deep --strict "$APP_PATH"
           codesign -dv "$APP_PATH" || true
 
-          mkdir -p build/export Payload
-          cp -R "$APP_PATH" Payload/App.app
-          (cd Payload && zip -qry ../build/export/App.ipa .)
-          rm -rf Payload
+          # ✅ Package IPA with Payload at root
+          rm -rf Payload build/export/App.ipa
+          mkdir -p Payload build/export
+          cp -R "$APP_PATH" "Payload/${XCODE_SCHEME}.app"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload build/export/App.ipa
+
+          # sanity check
+          unzip -l build/export/App.ipa | sed -n '1,60p'
           echo "IPA at: build/export/App.ipa"
 
       - name: Upload to TestFlight
@@ -166,6 +176,5 @@ jobs:
           path: |
             build/export/*.ipa
             build/App.xcarchive
-            ExportOptions.plist
             entitlements.plist
             emb.plist
