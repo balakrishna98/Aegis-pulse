@@ -51,7 +51,7 @@ jobs:
           echo "profile.mobileprovision bytes: $(wc -c < profile.mobileprovision)"
           shasum -a 256 cert.p12 || openssl dgst -sha256 cert.p12
 
-      - name: Create keychain & import certificate (multi-strategy)
+      - name: Create keychain & import certificate (PEMSEQ + fallback)
         shell: bash
         env:
           CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
@@ -69,20 +69,26 @@ jobs:
           if security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
             echo "P12 imported via security."
           else
-            echo "Direct import failed → extract PEM key/cert and import explicitly…"
-            # Extract (unencrypted) private key and certificate in PEM
-            openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nocerts -nodes -out key-any.pem
-            openssl pkcs12 -in cert.p12 -passin env:CERT_PW -clcerts -nokeys -out cert.pem
+            echo "Direct import failed → converting to PEM sequence and importing…"
+            # bundle.pem contains PRIVATE KEY + CERTIFICATE(s)
+            openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nodes -out bundle.pem
 
-            echo "Import PEM private key (format=pem, type=priv)…"
-            if ! security import key-any.pem -k build.keychain -T /usr/bin/codesign -f pem -t priv -P ""; then
-              echo "PEM import failed → convert to PKCS#8 DER and import…"
-              openssl pkcs8 -topk8 -nocrypt -in key-any.pem -out key-pkcs8.der -outform DER
-              security import key-pkcs8.der -k build.keychain -T /usr/bin/codesign -f pkcs8 -t priv -P ""
+            # First try importing the whole bundle as a PEM sequence (preferred)
+            if security import bundle.pem -k build.keychain -f pemseq -A -T /usr/bin/codesign; then
+              echo "Imported PEM sequence."
+            else
+              echo "PEM sequence import failed → split and import explicitly…"
+              # Extract just the first private key and all certs
+              awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' bundle.pem > key.pem
+              awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/'       bundle.pem > certs.pem
+
+              # Convert key to PKCS#8 DER (no passphrase) and import
+              openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.der -outform DER
+              security import key-pkcs8.der -k build.keychain -f pkcs8 -t priv -T /usr/bin/codesign -A
+
+              # Import certs (X.509)
+              security import certs.pem -k build.keychain -f x509 -T /usr/bin/codesign
             fi
-
-            echo "Import certificate (format=x509)…"
-            security import cert.pem -k build.keychain -T /usr/bin/codesign -f x509
           fi
 
           # Allow codesign/Xcode to use the key
