@@ -1,48 +1,86 @@
 workflows:
   ios_capacitor_appstore:
-    name: iOS • Capacitor • App Store
+    name: "iOS • Capacitor → App Store"
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
     environment:
       groups:
-        - appstore_credentials    # create this env group in Codemagic (see below)
+        - appstore_credentials   # contains APP_STORE_CONNECT_API_KEY / KEY_ID / ISSUER_ID
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
-        IOS_SCHEME: "App"
+        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+        APPLE_TEAM_ID: "<<<YOUR_TEAM_ID>>>"
       node: 20
       xcode: 15.4
+
+    cache:
+      cache_paths:
+        - ~/.npm
+        - ~/Library/Caches/CocoaPods
+
     scripts:
       - name: Install Node deps
         script: |
           npm ci
+
       - name: Build web assets
         script: |
           npm run build || npm run build:prod || true
-          # ensure we have www/
-          if [ -d dist ]; then rm -rf www && cp -r dist www; fi
-      - name: Ensure Capacitor iOS project exists & sync
+          # Ensure www exists for Capacitor
+          [ -d www ] || mkdir -p www
+
+      - name: Capacitor sync
         script: |
-          # add ios only if not present
-          if [ ! -d "ios" ]; then npx cap add ios; fi
           npx cap sync ios
-      - name: CocoaPods install
+
+      - name: Set build number
         script: |
           cd ios/App
-          pod install --repo-update
-      - name: Set bundle id
+          agvtool new-version -all "$BUILD_NUMBER"
+          cd -
+
+      - name: Xcode archive
         script: |
-          cd ios/App
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" App/Info.plist || true
-    ios:
-      xcode_workspace: "ios/App/App.xcworkspace"
-      xcode_scheme: "$IOS_SCHEME"
-      export_method: "app-store"
-      bundle_identifier: "$BUNDLE_ID"
-      automatic_code_signing: true
-      distribution_type: app_store
+          xcodebuild \
+            -workspace "$XCODE_WORKSPACE" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$CM_BUILD_DIR/ios_archive.xcarchive" \
+            clean archive \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Export IPA
+        script: |
+          cat > exportOptions.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$CM_BUILD_DIR/ios_archive.xcarchive" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "$CM_BUILD_DIR/build"
+
+    artifacts:
+      - $CM_BUILD_DIR/build/*.ipa
+      - $CM_BUILD_DIR/ios_archive.xcarchive
+
     publishing:
       app_store_connect:
-        api_key: $APP_STORE_CONNECT_API_KEY
         key_id: $APP_STORE_CONNECT_KEY_ID
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        api_key: $APP_STORE_CONNECT_API_KEY
         submit_to_testflight: true
-        beta_groups:
-          - Internal Testers
+        # optionally auto-submit for external testing:
+        # submit_to_app_store: false
