@@ -6,12 +6,12 @@ workflows:
 
     environment:
       groups:
-        - appstore_credentials   # contains APP_STORE_CONNECT_API_KEY / KEY_ID / ISSUER_ID
+        - appstore_credentials   # must include APP_STORE_CONNECT_API_KEY / APP_STORE_CONNECT_KEY_ID / APP_STORE_CONNECT_ISSUER_ID
       vars:
         BUNDLE_ID: "com.balu.aegispulse"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
-        APPLE_TEAM_ID: "<<<YOUR_TEAM_ID>>>"
+        APPLE_TEAM_ID: "1A2B3C4D5E"   
       node: 20
       xcode: 15.4
 
@@ -28,7 +28,6 @@ workflows:
       - name: Build web assets
         script: |
           npm run build || npm run build:prod || true
-          # Ensure www exists for Capacitor
           [ -d www ] || mkdir -p www
 
       - name: Capacitor sync
@@ -41,20 +40,22 @@ workflows:
           agvtool new-version -all "$BUILD_NUMBER"
           cd -
 
-      - name: Xcode archive
+      - name: Xcode archive (auto signing)
         script: |
           xcodebuild \
             -workspace "$XCODE_WORKSPACE" \
             -scheme "$XCODE_SCHEME" \
             -configuration Release \
-            -sdk iphoneos \
             -archivePath "$CM_BUILD_DIR/ios_archive.xcarchive" \
+            -destination "generic/platform=iOS" \
             clean archive \
+            -allowProvisioningUpdates \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
-            PROVISIONING_PROFILE_SPECIFIER=""
+            CODE_SIGNING_ALLOWED=YES
 
-      - name: Export IPA
+      - name: Export IPA (App Store)
         script: |
           cat > exportOptions.plist <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -64,13 +65,16 @@ workflows:
             <key>method</key><string>app-store</string>
             <key>signingStyle</key><string>automatic</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>uploadSymbols</key><true/>
+            <key>compileBitcode</key><false/>
           </dict>
           </plist>
           EOF
           xcodebuild -exportArchive \
             -archivePath "$CM_BUILD_DIR/ios_archive.xcarchive" \
             -exportOptionsPlist exportOptions.plist \
-            -exportPath "$CM_BUILD_DIR/build"
+            -exportPath "$CM_BUILD_DIR/build" \
+            -allowProvisioningUpdates
 
     artifacts:
       - $CM_BUILD_DIR/build/*.ipa
@@ -82,5 +86,3 @@ workflows:
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         api_key: $APP_STORE_CONNECT_API_KEY
         submit_to_testflight: true
-        # optionally auto-submit for external testing:
-        # submit_to_app_store: false
