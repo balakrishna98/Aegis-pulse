@@ -1,0 +1,96 @@
+name: iOS • Capacitor (Manual Signing on macOS runner)
+
+on:
+  workflow_dispatch:
+
+env:
+  BUNDLE_ID: com.balu.aegispulse
+  XCODE_WORKSPACE: ios/App/App.xcworkspace
+  XCODE_SCHEME: App
+  APPLE_TEAM_ID: 4ZB476DJS4
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - name: Tooling
+        run: |
+          xcodebuild -version
+          sudo gem install cocoapods -N || true
+
+      - name: Install deps & sync iOS
+        run: |
+          npm ci
+          npx cap sync ios
+
+      - name: Decode signing assets
+        shell: bash
+        run: |
+          echo "$IOS_CERTIFICATE_P12_BASE64" | base64 --decode > cert.p12
+          echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > profile.mobileprovision
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+
+      - name: Keychain & certificate
+        run: |
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security set-keychain-settings -u build.keychain
+          security import cert.p12 -k build.keychain -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+
+      - name: Install provisioning profile
+        run: |
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          /usr/bin/security cms -D -i profile.mobileprovision > profile.plist
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' profile.plist)
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          echo "Profile UUID: $UUID"
+
+      - name: Build archive
+        run: |
+          xcodebuild clean -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" -configuration Release
+          xcodebuild -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" -configuration Release -sdk iphoneos \
+            -archivePath "$PWD/build/App.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" archive
+
+      - name: Export IPA
+        run: |
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>compileBitcode</key><false/>
+            <key>manageAppVersionAndBuildNumber</key><true/>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${BUNDLE_ID}</key><string>${{ secrets.PROVISIONING_PROFILE_NAME }}</string>
+            </dict>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive -archivePath "$PWD/build/App.xcarchive" \
+            -exportOptionsPlist ExportOptions.plist -exportPath "$PWD/build/export"
+
+      - name: Upload to TestFlight
+        run: |
+          sudo gem install fastlane -N
+          echo "${{ secrets.ASC_API_KEY_P8_BASE64 }}" | base64 --decode > AuthKey.p8
+          KEY_ESCAPED=$(awk '{printf "%s\\n",$0}' AuthKey.p8)
+          cat > api_key.json <<JSON
+          { "key_id":"${{ secrets.ASC_API_KEY_ID }}", "issuer_id":"${{ secrets.ASC_API_ISSUER_ID }}", "key":"$KEY_ESCAPED", "in_house":false }
+          JSON
+          fastlane pilot upload --api_key_path api_key.json --ipa "$PWD/build/export/*.ipa" --bundle_identifier "$BUNDLE_ID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipa-and-logs
+          path: |
+            build/export/*.ipa
+            build/App.xcarchive
+            ExportOptions.plist
