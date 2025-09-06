@@ -17,6 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ✅ Use Xcode 16 (iOS 18 SDK)
+      - name: Select Xcode 16
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.0"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -114,7 +120,7 @@ jobs:
              "$APP_PATH/embedded.mobileprovision"
           ls -l "$APP_PATH/embedded.mobileprovision"
 
-      - name: Manual sign & package IPA
+      - name: Manual sign & package IPA (fix collisions → sign → zip)
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +131,22 @@ jobs:
           /usr/bin/security cms -D -i "$APP_PATH/embedded.mobileprovision" > emb.plist
           /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' emb.plist > entitlements.plist
           echo "Entitlements:"; /usr/libexec/PlistBuddy -c 'Print' entitlements.plist || true
+
+          MAIN_BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")
+          echo "Main bundle id: $MAIN_BID"
+
+          # 🔧 Fix CFBundleIdentifier collisions in nested bundles (frameworks/bundles/apps/appex)
+          while IFS= read -r p; do
+            [ -f "$p/Info.plist" ] || continue
+            BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$p/Info.plist" 2>/dev/null || echo "")
+            [ -n "$BID" ] || continue
+            if [[ "$p" != "$APP_PATH" && "$BID" == "$MAIN_BID" ]]; then
+              SAFE_NAME=$(basename "$p" | tr -cd 'A-Za-z0-9._-')
+              NEW_BID="${MAIN_BID}.${SAFE_NAME}"
+              echo "⚠️  Collision in: $p  (had $BID)  →  setting CFBundleIdentifier=$NEW_BID"
+              /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $NEW_BID" "$p/Info.plist" || true
+            fi
+          done < <(find "$APP_PATH" \( -name "*.appex" -o -name "*.framework" -o -name "*.bundle" -o -name "*.app" \) -type d)
 
           # Re-sign nested frameworks / dylibs
           if [ -d "$APP_PATH/Frameworks" ]; then
@@ -138,7 +160,7 @@ jobs:
               xargs -0 -I{} codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" --entitlements entitlements.plist "{}"
           fi
 
-          # Re-sign main app
+          # Re-sign main app last
           codesign --force --options runtime --timestamp --keychain build.keychain -s "$DIST_ID" --entitlements entitlements.plist "$APP_PATH"
           codesign --verify --deep --strict "$APP_PATH"
           codesign -dv "$APP_PATH" || true
