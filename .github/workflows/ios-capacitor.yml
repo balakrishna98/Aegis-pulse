@@ -61,7 +61,9 @@ jobs:
           security default-keychain -s build.keychain
           security unlock-keychain -p "" build.keychain
           security set-keychain-settings -u build.keychain
+          # verify p12
           openssl pkcs12 -in cert.p12 -passin env:CERT_PW -info -noout
+          # try p12 import; if it fails, import PEMs
           if ! security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
             openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nodes -out bundle.pem
             if ! security import bundle.pem -k build.keychain -f pemseq -A -T /usr/bin/codesign; then
@@ -88,7 +90,7 @@ jobs:
           echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
           echo "Profile UUID: $UUID  Name: $PROFILE_NAME"
 
-      # build WITHOUT signing
+      # Build WITHOUT signing (avoids Pods profile errors)
       - name: Build archive (no signing)
         shell: bash
         run: |
@@ -101,8 +103,17 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             clean archive
 
-      # export WITH manual signing (no Apple account needed)
-      - name: Export IPA (manual signing at export)
+      # Embed the App Store profile into the archived .app (belt & suspenders)
+      - name: Embed provisioning profile into archive
+        shell: bash
+        run: |
+          APP_PATH="$PWD/build/App.xcarchive/Products/Applications/${XCODE_SCHEME}.app"
+          cp "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" \
+             "$APP_PATH/embedded.mobileprovision"
+          ls -l "$APP_PATH/embedded.mobileprovision"
+
+      # Export WITH automatic signing; NO provisioningProfiles dict; NO allowProvisioningUpdates
+      - name: Export IPA (automatic signing at export)
         shell: bash
         run: |
           cat > ExportOptions.plist <<EOF
@@ -111,11 +122,7 @@ jobs:
           <plist version="1.0"><dict>
             <key>method</key><string>app-store-connect</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>signingCertificate</key><string>Apple Distribution</string>
-            <key>provisioningProfiles</key><dict>
-              <key>${BUNDLE_ID}</key><string>${{ secrets.PROVISIONING_PROFILE_NAME }}</string>
-            </dict>
+            <key>signingStyle</key><string>automatic</string>
             <key>compileBitcode</key><false/>
             <key>destination</key><string>export</string>
           </dict></plist>
