@@ -62,20 +62,13 @@ jobs:
           security unlock-keychain -p "" build.keychain
           security set-keychain-settings -u build.keychain
 
-          echo "Verify P12 password with OpenSSL…"
+          # verify p12
           openssl pkcs12 -in cert.p12 -passin env:CERT_PW -info -noout
 
-          echo "Try direct P12 import…"
-          if security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
-            echo "P12 imported via security."
-          else
-            echo "Direct import failed → converting to PEM sequence and importing…"
+          # try p12 import; if it fails, import PEMs
+          if ! security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign; then
             openssl pkcs12 -in cert.p12 -passin env:CERT_PW -nodes -out bundle.pem
-
-            if security import bundle.pem -k build.keychain -f pemseq -A -T /usr/bin/codesign; then
-              echo "Imported PEM sequence."
-            else
-              echo "PEM sequence import failed → split and import explicitly…"
+            if ! security import bundle.pem -k build.keychain -f pemseq -A -T /usr/bin/codesign; then
               awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' bundle.pem > key.pem
               awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/'       bundle.pem > certs.pem
               openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.der -outform DER
@@ -85,8 +78,7 @@ jobs:
           fi
 
           security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
-          echo "Installed identities:"
-          security find-identity -v -p codesigning build.keychain || true
+          echo "Installed identities:"; security find-identity -v -p codesigning build.keychain || true
 
       - name: Install provisioning profile
         shell: bash
@@ -98,26 +90,23 @@ jobs:
           /usr/bin/security cms -D -i profile.mobileprovision > profile.plist
           UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' profile.plist)
           cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
-          echo "Profile UUID: $UUID  Name: $PROFILE_NAME"
-          # expose for later steps
           echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+          echo "Profile UUID: $UUID  Name: $PROFILE_NAME"
 
-      - name: Build archive (force manual distribution signing)
+      # ⬇️ No signing during archive to avoid Pods profile errors
+      - name: Build archive (no signing)
         shell: bash
         run: |
           xcodebuild -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" \
             -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -archivePath "$PWD/build/App.xcarchive" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
+            CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-            PROVISIONING_PROFILE_SPECIFIER="${{ secrets.PROVISIONING_PROFILE_NAME }}" \
-            PROVISIONING_PROFILE="$PROFILE_UUID" \
-            archive
+            clean archive
 
-      - name: Export IPA
+      - name: Export IPA (sign here with App Store profile)
         shell: bash
         run: |
           cat > ExportOptions.plist <<EOF
@@ -125,18 +114,21 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>method</key><string>app-store</string>
-            <key>compileBitcode</key><false/>
             <key>signingStyle</key><string>manual</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
             <key>provisioningProfiles</key><dict>
               <key>${BUNDLE_ID}</key><string>${{ secrets.PROVISIONING_PROFILE_NAME }}</string>
             </dict>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>compileBitcode</key><false/>
+            <key>destination</key><string>export</string>
           </dict></plist>
           EOF
           xcodebuild -exportArchive \
             -archivePath "$PWD/build/App.xcarchive" \
             -exportOptionsPlist ExportOptions.plist \
-            -exportPath "$PWD/build/export"
+            -exportPath "$PWD/build/export" \
+            -allowProvisioningUpdates
 
       - name: Upload to TestFlight
         shell: bash
