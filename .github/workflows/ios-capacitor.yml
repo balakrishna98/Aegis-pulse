@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ✅ Use Xcode 16.2 (iOS 18 SDK)
+      # Use Xcode 16.2 (iOS 18 SDK)
       - name: Select Xcode 16.2
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -37,6 +37,17 @@ jobs:
         run: |
           npm ci
           npx cap sync ios
+
+      # ✅ NEW: bump build number so every upload is unique
+      - name: Bump iOS build number (CFBundleVersion)
+        shell: bash
+        run: |
+          set -euo pipefail
+          INFO_PLIST="ios/App/App/Info.plist"
+          BUILD_NUM="${GITHUB_RUN_NUMBER}"   # monotonically increasing per repo
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$INFO_PLIST" || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" "$INFO_PLIST"
+          echo "New CFBundleVersion = $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")"
 
       - name: Decode signing assets (robust)
         shell: bash
@@ -135,7 +146,7 @@ jobs:
           MAIN_BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")
           echo "Main bundle id: $MAIN_BID"
 
-          # 🔧 Fix CFBundleIdentifier collisions in nested bundles (frameworks/bundles/apps/appex)
+          # Fix CFBundleIdentifier collisions in nested bundles
           while IFS= read -r p; do
             [ -f "$p/Info.plist" ] || continue
             BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$p/Info.plist" 2>/dev/null || echo "")
@@ -143,7 +154,7 @@ jobs:
             if [[ "$p" != "$APP_PATH" && "$BID" == "$MAIN_BID" ]]; then
               SAFE_NAME=$(basename "$p" | tr -cd 'A-Za-z0-9._-')
               NEW_BID="${MAIN_BID}.${SAFE_NAME}"
-              echo "⚠️  Collision in: $p  (had $BID)  →  setting CFBundleIdentifier=$NEW_BID"
+              echo "Collision in: $p  (had $BID)  →  setting CFBundleIdentifier=$NEW_BID"
               /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $NEW_BID" "$p/Info.plist" || true
             fi
           done < <(find "$APP_PATH" \( -name "*.appex" -o -name "*.framework" -o -name "*.bundle" -o -name "*.app" \) -type d)
@@ -165,13 +176,12 @@ jobs:
           codesign --verify --deep --strict "$APP_PATH"
           codesign -dv "$APP_PATH" || true
 
-          # ✅ Package IPA with Payload at root
+          # Package IPA with Payload at root
           rm -rf Payload build/export/App.ipa
           mkdir -p Payload build/export
           cp -R "$APP_PATH" "Payload/${XCODE_SCHEME}.app"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload build/export/App.ipa
 
-          # sanity check
           unzip -l build/export/App.ipa | sed -n '1,60p'
           echo "IPA at: build/export/App.ipa"
 
