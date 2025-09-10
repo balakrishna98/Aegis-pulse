@@ -1,0 +1,2 @@
+TARGETED_DEVICE_FAMILY = 1
+RESOURCES_TARGETED_DEVICE_FAMILY = 1   # optional; omit to inherit
